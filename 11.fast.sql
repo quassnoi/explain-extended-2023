@@ -1,0 +1,255 @@
+WITH    RECURSIVE
+        basicMoves (initial, cornerMove, edgeMove, cornerTurn, edgeTurn) AS
+        (
+        VALUES
+                (
+                'U',
+                ARRAY[ 4,  1,  2,  7,  3,  5,  6,  0]::INT[],  ARRAY[ 8,  1,  2, 11,  4,  5,  6,  7,  3,  9, 10,  0]::INT[],
+                ARRAY[ 2,  0,  0,  2,  1,  0,  0,  1]::INT[],  ARRAY[ 1,  0,  0,  1,  0,  0,  0,  0,  1,  0,  0,  1]::INT[]
+                ),
+                (
+                'D',
+                ARRAY[ 0,  5,  6,  3,  4,  2,  1,  7]::INT[],  ARRAY[ 0, 10,  9,  3,  4,  5,  6,  7,  8,  1,  2, 11]::INT[],
+                ARRAY[ 0,  2,  2,  0,  0,  1,  1,  0]::INT[],  ARRAY[ 0,  1,  1,  0,  0,  0,  0,  0,  0,  1,  1,  0]::INT[]
+                ),
+                (
+                'F',
+                ARRAY[ 0,  6,  2,  4,  1,  5,  3,  7]::INT[],  ARRAY[ 0,  1,  2,  3,  4,  9,  8,  7,  5,  6, 10, 11]::INT[],
+                ARRAY[ 0,  1,  0,  1,  2,  0,  2,  0]::INT[],  ARRAY[ 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0]::INT[]
+                ),
+                (
+                'B',
+                ARRAY[ 7,  1,  5,  3,  4,  0,  6,  2]::INT[],  ARRAY[ 0,  1,  2,  3, 11,  5,  6, 10,  8,  9,  4,  7]::INT[],
+                ARRAY[ 1,  0,  1,  0,  0,  2,  0,  2]::INT[],  ARRAY[ 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0]::INT[]
+                ),
+                (
+                'L',
+                ARRAY[ 5,  4,  2,  3,  0,  1,  6,  7]::INT[],  ARRAY[ 4,  5,  2,  3,  1,  0,  6,  7,  8,  9, 10, 11]::INT[],
+                ARRAY[ 0,  0,  0,  0,  0,  0,  0,  0]::INT[],  ARRAY[ 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0]::INT[]
+                ),
+                (
+                'R',
+                ARRAY[ 0,  1,  7,  6,  4,  5,  2,  3]::INT[],  ARRAY[ 0,  1,  7,  6,  4,  5,  2,  3,  8,  9, 10, 11]::INT[],
+                ARRAY[ 0,  0,  0,  0,  0,  0,  0,  0]::INT[],  ARRAY[ 0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0]::INT[]
+                )
+        ),
+        moves (turns, initial, move, reverse, cornerMove, edgeMove, cornerTurn, edgeTurn) AS MATERIALIZED
+        (
+        SELECT  1 AS turns, initial, initial, LOWER(initial),
+                cornerMove, edgeMove, cornerTurn, edgeTurn
+        FROM    basicMoves bm
+        UNION ALL
+        SELECT  turns + 1, initial,
+                CASE turns WHEN 1 THEN initial || '2' WHEN 2 THEN LOWER(initial) END,
+                CASE turns WHEN 1 THEN initial || '2' WHEN 2 THEN initial END,
+                t.*
+        FROM    moves am
+        JOIN    basicMoves bm
+        USING   (initial)
+        CROSS JOIN LATERAL
+                turn(am.cornerMove, am.edgeMove, am.cornerTurn, am.edgeTurn, bm.cornerMove, bm.edgeMove, bm.cornerTurn, bm.edgeTurn) t
+        WHERE   turns <= 2
+        ),
+        solved (cornerPosition, edgePosition, cornerOrientation, edgeOrientation) AS MATERIALIZED
+        (
+        VALUES
+                (
+                ARRAY(SELECT v FROM GENERATE_SERIES(0, 7) v), ARRAY(SELECT v FROM GENERATE_SERIES(0, 11) v),
+                ARRAY(SELECT 0 FROM GENERATE_SERIES(0, 7)), ARRAY(SELECT 0 FROM GENERATE_SERIES(0, 11))
+                )
+        ),
+        sequence (turns) AS
+        (
+        VALUES
+        ('L2 d U F2 U F2 D B f D f l B2 f R2 F2 r F D2 l U L R2 f D2 F d')
+        ),
+        turns (move, i) AS MATERIALIZED
+        (
+        SELECT  turn.*
+        FROM    sequence
+        CROSS JOIN LATERAL
+                STRING_TO_TABLE(turns, ' ') WITH ORDINALITY AS turn (move, i)
+        ),
+        scramble (cornerPosition, edgePosition, cornerOrientation, edgeOrientation, currentMove, i) AS MATERIALIZED
+        (
+        SELECT  cornerPosition, edgePosition, cornerOrientation, edgeOrientation,
+                NULL,
+                1::BIGINT AS i
+        FROM    solved
+        UNION ALL
+        SELECT  newValues.*,
+                move,
+                turns.i + 1
+        FROM    scramble e
+        JOIN    turns
+        USING   (i)
+        JOIN    moves
+        USING   (move)
+        CROSS JOIN LATERAL
+                turn(cornerPosition, edgePosition, cornerOrientation, edgeOrientation, cornerMove, edgeMove, cornerTurn, edgeTurn) AS newValues
+        ),
+        unsolved AS MATERIALIZED
+        (
+        SELECT  cornerPosition, edgePosition, cornerOrientation, edgeOrientation
+        FROM    scramble
+        ORDER BY
+                i DESC
+        LIMIT   1
+        ),
+        g1Entry AS
+        (
+        SELECT  g1.state, moves
+        FROM    (
+                SELECT  STRING_AGG(edge::TEXT, '') AS state
+                FROM    unsolved
+                CROSS JOIN LATERAL
+                        UNNEST(edgeOrientation) edge
+                ) q
+        JOIN    g1stored g1
+        USING   (state)
+        ),
+        g1Moves AS MATERIALIZED
+        (
+        SELECT  u.*, moves, NULL::TEXT AS move
+        FROM    unsolved u
+        CROSS JOIN
+                g1Entry
+        UNION ALL
+        SELECT  newValues.*, moves[:(ARRAY_LENGTH(moves, 1) - 1)], moves.move
+        FROM    g1Moves
+        JOIN    moves
+        ON      reverse = moves[ARRAY_LENGTH(moves, 1)]
+        CROSS JOIN LATERAL
+                turn(cornerPosition, edgePosition, cornerOrientation, edgeOrientation, cornerMove, edgeMove, cornerTurn, edgeTurn) AS newValues
+        ),
+        g2Entry AS
+        (
+        SELECT  g1Moves.cornerPosition, g1Moves.edgePosition, g1Moves.cornerOrientation, g1Moves.edgeOrientation,
+                g2.moves
+        FROM    (
+                SELECT  *
+                FROM    g1Moves
+                WHERE   moves = ARRAY[]::TEXT[]
+                ) g1Moves
+        CROSS JOIN LATERAL
+                (
+                SELECT  STRING_AGG(value::TEXT, '')
+                FROM    UNNEST(cornerOrientation) AS value
+                ) AS q (corners)
+        CROSS JOIN LATERAL
+                (
+                SELECT  STRING_AGG((value >= 8)::INT::TEXT, '')
+                FROM    UNNEST(edgePosition) AS value
+                ) AS q2 (middleEdges)
+        CROSS JOIN LATERAL
+                (
+                SELECT  corners || middleEdges
+                ) AS q3 (state)
+        JOIN    g2stored g2
+        USING   (state)
+        ),
+        g2Moves AS MATERIALIZED
+        (
+        SELECT  *, NULL::TEXT AS move
+        FROM    g2Entry
+        UNION ALL
+        SELECT  newValues.*, moves[:(ARRAY_LENGTH(moves, 1) - 1)], moves.move
+        FROM    g2Moves
+        JOIN    moves
+        ON      reverse = moves[ARRAY_LENGTH(moves, 1)]
+        CROSS JOIN LATERAL
+                turn(cornerPosition, edgePosition, cornerOrientation, edgeOrientation, cornerMove, edgeMove, cornerTurn, edgeTurn) AS newValues
+        ),
+        g3Entry AS
+        (
+        SELECT  g2Last.cornerPosition, g2Last.edgePosition, g2Last.cornerOrientation, g2Last.edgeOrientation,
+                g3.moves
+        FROM    (
+                SELECT  *
+                FROM    g2Moves
+                WHERE   moves = ARRAY[]::TEXT[]
+                ) g2Last
+        CROSS JOIN LATERAL
+                (
+                SELECT  STRING_AGG(value::TEXT, '')
+                FROM    UNNEST(cornerPosition) AS value
+                ) AS q (corners)
+        CROSS JOIN LATERAL
+                (
+                SELECT  STRING_AGG((value / 4)::INT::TEXT, '')
+                FROM    UNNEST(edgePosition) AS value
+                ) AS q2 (layerEdges)
+        CROSS JOIN LATERAL
+                twist(corners) AS twistedCorners
+        CROSS JOIN LATERAL
+                (
+                SELECT  twistedCorners || layerEdges
+                ) AS q3 (state)
+        JOIN    g3stored g3
+        USING   (state)
+        ),
+        g3Moves AS MATERIALIZED
+        (
+        SELECT  *, NULL::TEXT AS move
+        FROM    g3Entry
+        UNION ALL
+        SELECT  newValues.*, moves[:(ARRAY_LENGTH(moves, 1) - 1)], moves.move
+        FROM    g3Moves
+        JOIN    moves
+        ON      reverse = moves[ARRAY_LENGTH(moves, 1)]
+        CROSS JOIN LATERAL
+                turn(cornerPosition, edgePosition, cornerOrientation, edgeOrientation, cornerMove, edgeMove, cornerTurn, edgeTurn) AS newValues
+        ),
+        g4Entry AS
+        (
+        SELECT  g3Last.cornerPosition, g3Last.edgePosition, g3Last.cornerOrientation, g3Last.edgeOrientation,
+                g4.moves
+        FROM    (
+                SELECT  *
+                FROM    g3Moves
+                WHERE   moves = ARRAY[]::TEXT[]
+                ) g3Last
+        CROSS JOIN LATERAL
+                (
+                SELECT  STRING_AGG(value::TEXT, '')
+                FROM    UNNEST(cornerPosition) AS value
+                ) AS q (corners)
+        CROSS JOIN LATERAL
+                (
+                SELECT  STRING_AGG(UPPER(TO_HEX(value::INT)), '')
+                FROM    UNNEST(edgePosition) AS value
+                ) AS q2 (edges)
+        CROSS JOIN LATERAL
+                (
+                SELECT  corners || edges
+                ) AS q3 (state)
+        JOIN    g4stored g4
+        USING   (state)
+        ),
+        g4Moves AS MATERIALIZED
+        (
+        SELECT  *, NULL::TEXT AS move
+        FROM    g4Entry
+        UNION ALL
+        SELECT  newValues.*, moves[:(ARRAY_LENGTH(moves, 1) - 1)], moves.move
+        FROM    g4Moves
+        JOIN    moves
+        ON      reverse = moves[ARRAY_LENGTH(moves, 1)]
+        CROSS JOIN LATERAL
+                turn(cornerPosition, edgePosition, cornerOrientation, edgeOrientation, cornerMove, edgeMove, cornerTurn, edgeTurn) AS newValues
+        )
+SELECT  STRING_AGG(move, ' ') AS result
+FROM    (
+        SELECT  *
+        FROM    g1Moves
+        UNION ALL
+        SELECT  *
+        FROM    g2Moves
+        UNION ALL
+        SELECT  *
+        FROM    g3Moves
+        UNION ALL
+        SELECT  *
+        FROM    g4Moves
+        ) q
+WHERE   move <> ''
